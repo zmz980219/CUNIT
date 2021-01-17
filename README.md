@@ -6,7 +6,10 @@
 2. code rewriting
 	1) change dataset.py Done
 	2) change model.py 
-		2.1) forward
+		2.1) forward Done
 		2.2) add new networks parts
 		2.3) update_D update_G need to be rethink and rewrite
 	3) do testing and fix bugs
+	
+TODO list:
+add networks
