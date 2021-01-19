@@ -12,4 +12,4 @@
 	3) do testing and fix bugs
 	
 TODO list:
-add networks
+change the processing of mask, it should be 0 or 255(I can choose to reprocess them in dataset.py)
