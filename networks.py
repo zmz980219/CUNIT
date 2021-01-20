@@ -81,6 +81,99 @@ class ContentInsDiscriminator(nn.Module):
         outs.append(out)
         return outs
 
+class DisClothTransfer(nn.Module):
+    def __init__(self, input_nc, norm):
+        super(DisClothTransfer, self).__init__()
+        norm_layer = get_norm_layer(norm)
+        self.model_x = NLayerSetDiscriminator(input_nc, norm_layer=norm_layer)
+        self.model_y = NLayerSetDiscriminator(input_nc, norm_layer=norm_layer)
+
+    def forward(self, x, y):
+        out_x = self.model_x(x)
+        out_y = self.model_y(y)
+        return out_x, out_y
+
+    def forward_x(self, x):
+        out = self.model_x(x)
+        return out
+
+    def forward_y(self, y):
+        out = self.model_y(y)
+        return out
+
+# PatchGAN discriminator for "set" of instance attributes
+# See https://openreview.net/forum?id=ryxwJhC9YX for details
+class NLayerSetDiscriminator(nn.Module):
+    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm2d, use_sigmoid=False):
+        super(NLayerSetDiscriminator, self).__init__()
+        self.input_nc = input_nc
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        kw = 4
+        padw = 1
+        self.feature_img = self.get_feature_extractor(input_nc, ndf, n_layers, kw, padw, norm_layer, use_bias)
+        self.feature_seg = self.get_feature_extractor(1, ndf, n_layers, kw, padw, norm_layer, use_bias)
+        self.classifier = self.get_classifier(2 * ndf, n_layers, kw, padw, norm_layer, use_sigmoid)  # 2*ndf
+
+    def get_feature_extractor(self, input_nc, ndf, n_layers, kw, padw, norm_layer, use_bias):
+        model = [
+            # Use spectral normalization
+            SpectralNorm(nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw)),
+            nn.LeakyReLU(0.2, True)
+        ]
+        nf_mult = 1
+        nf_mult_prev = 1
+        for n in range(1, n_layers):
+            nf_mult_prev = nf_mult
+            nf_mult = min(2 ** n, 8)
+            model += [
+                # Use spectral normalization
+                SpectralNorm(nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=2, padding=padw, bias=use_bias)),
+                norm_layer(ndf * nf_mult),
+                nn.LeakyReLU(0.2, True)
+            ]
+        return nn.Sequential(*model)
+
+    def get_classifier(self, ndf, n_layers, kw, padw, norm_layer, use_sigmoid):
+        nf_mult_prev = min(2 ** (n_layers-1), 8)
+        nf_mult = min(2 ** n_layers, 8)
+        model = [
+            # Use spectral normalization
+            SpectralNorm(nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw)),
+            norm_layer(ndf * nf_mult),
+            nn.LeakyReLU(0.2, True)
+        ]
+        # Use spectral normalization
+        model += [SpectralNorm(nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw))]
+        if use_sigmoid:
+            model += [nn.Sigmoid()]
+        return nn.Sequential(*model)
+
+    def forward(self, inp):
+        # split data
+        img = inp[:, :self.input_nc, :, :]  # (B, CX, W, H)
+        segs = inp[:, self.input_nc:, :, :]  # (B, CA, W, H)
+        mean = (segs + 1).mean(0).mean(-1).mean(-1)
+        if mean.sum() == 0:
+            mean[0] = 1  # forward at least one segmentation
+
+        # run feature extractor
+        feat_img = self.feature_img(img)
+        feat_segs = list()
+        for i in range(segs.size(1)):
+            if mean[i] > 0:  # skip empty segmentation
+                seg = segs[:, i, :, :].unsqueeze(1)
+                feat_segs.append(self.feature_seg(seg))
+        feat_segs_sum = torch.sum(torch.stack(feat_segs), dim=0)  # aggregated set feature
+
+        # run classifier
+        feat = torch.cat([feat_img, feat_segs_sum], dim=1)
+        out = self.classifier(feat)
+        return out
+
 ####################################################################
 #---------------------------- Encoders -----------------------------
 ####################################################################
@@ -197,7 +290,12 @@ class Generator(nn.Module):
     def __init__(self, output_dim_x, output_dim_y, nz):
         super(Generator, self).__init__()
         self.nz = nz
-        channel = 256 + self.nz
+        channel = 256
+
+        dec_share = []
+        dec_share += [INSResBlock(channel, channel)]
+        self.dec_share = nn.Sequential(*dec_share)
+        channel = channel + self.nz
 
         decX1 = []
         decY1 = []
@@ -207,6 +305,7 @@ class Generator(nn.Module):
         self.decX1 = nn.Sequential(*decX1)
         self.decY1 = nn.Sequential(*decY1)
 
+        channel = channel + self.nz
         self.decX2 = nn.Sequential(
             ReLUINSConvTranspose2d(channel, channel // 2, kernel_size=3, stride=2, padding=1, output_padding=1)
         )
@@ -215,6 +314,7 @@ class Generator(nn.Module):
         )
         channel = channel//2
 
+        channel = channel + self.nz
         self.decX3 = nn.Sequential(
             ReLUINSConvTranspose2d(channel, channel // 2, kernel_size=3, stride=2, padding=1, output_padding=1)
         )
@@ -223,6 +323,7 @@ class Generator(nn.Module):
         )
         channel = channel//2
 
+        channel = channel + self.nz
         self.decX4 = nn.Sequential(
             nn.ConvTranspose2d(channel, output_dim_x, kernel_size=1, stride=1, padding=0),
             nn.Tanh()
@@ -232,18 +333,36 @@ class Generator(nn.Module):
             nn.Tanh()
         )
 
-    def forward_x(self, xands):
-        out1 = self.decX1(xands)
-        out2 = self.decX2(out1)
-        out3 = self.decX3(out2)
-        out4 = self.decX4(out3)
+    def forward_x(self, x, z):
+        out0 = self.dec_share(x)
+        z_img = z.view(z.size(0), z.size(1), 1, 1).expand(z.size(0), z.size(1), x.size(2), x.size(3))
+        x_and_z = torch.cat([out0, z_img], 1)
+        out1 = self.decX1(x_and_z)
+        z_img2 = z.view(z.size(0), z.size(1), 1, 1).expand(z.size(0), z.size(1), out1.size(2), out1.size(3))
+        x_and_z2 = torch.cat([out1, z_img2], 1)
+        out2 = self.decX2(x_and_z2)
+        z_img3 = z.view(z.size(0), z.size(1), 1, 1).expand(z.size(0), z.size(1), out2.size(2), out2.size(3))
+        x_and_z3 = torch.cat([out2, z_img3], 1)
+        out3 = self.decX3(x_and_z3)
+        z_img4 = z.view(z.size(0), z.size(1), 1, 1).expand(z.size(0), z.size(1), out3.size(2), out3.size(3))
+        x_and_z4 = torch.cat([out3, z_img4], 1)
+        out4 = self.decX4(x_and_z4)
         return out4
 
-    def forward_y(self, yands):
-        out1 = self.decY1(yands)
-        out2 = self.decY2(out1)
-        out3 = self.decY3(out2)
-        out4 = self.decY4(out3)
+    def forward_y(self, x, z):
+        out0 = self.dec_share(x)
+        z_img = z.view(z.size(0), z.size(1), 1, 1).expand(z.size(0), z.size(1), x.size(2), x.size(3))
+        x_and_z = torch.cat([out0, z_img], 1)
+        out1 = self.decY1(x_and_z)
+        z_img2 = z.view(z.size(0), z.size(1), 1, 1).expand(z.size(0), z.size(1), out1.size(2), out1.size(3))
+        x_and_z2 = torch.cat([out1, z_img2], 1)
+        out2 = self.decY2(x_and_z2)
+        z_img3 = z.view(z.size(0), z.size(1), 1, 1).expand(z.size(0), z.size(1), out2.size(2), out2.size(3))
+        x_and_z3 = torch.cat([out2, z_img3], 1)
+        out3 = self.decY3(x_and_z3)
+        z_img4 = z.view(z.size(0), z.size(1), 1, 1).expand(z.size(0), z.size(1), out3.size(2), out3.size(3))
+        x_and_z4 = torch.cat([out3, z_img4], 1)
+        out4 = self.decY4(x_and_z4)
         return out4
 
 class GlobalLevelResBlock(nn.Module):
@@ -421,6 +540,106 @@ class ResnetBlock(nn.Module):
         out = x + self.conv_block(x)  # add skip connections
         return out
 
+class ClothTransfer(nn.Module):
+    def __init__(self, input_nc, output_nc, ngf=64, norm='batch', use_dropout=False, n_blocks=6, padding_type='reflect'):
+        super(ClothTransfer, self).__init__()
+        norm_layer = get_norm_layer(norm_type=norm)
+        self.model_x = ResnetSetGenerator(input_nc, output_nc, ngf, norm_layer, use_dropout, n_blocks, padding_type)
+        self.model_y = ResnetSetGenerator(input_nc, output_nc, ngf, norm_layer, use_dropout, n_blocks, padding_type)
+
+    def forward(self, x, y):
+        output_x = self.model_x(x)
+        output_y = self.model_y(y)
+        return output_x, output_y
+
+    def forward_x(self, x):
+        output_x = self.model_x(x)
+        return output_x
+
+    def forward_y(self, y):
+        output_y = self.model_y(y)
+        return output_y
+
+class ResnetSetGenerator(nn.Module):
+    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=6, padding_type='reflect'):
+        assert (n_blocks >= 0)
+        super(ResnetSetGenerator, self).__init__()
+        self.input_nc = input_nc
+        self.output_nc = output_nc
+        self.ngf = ngf
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        n_downsampling = 2
+        self.encoder_img = self.get_encoder(input_nc, n_downsampling, ngf, norm_layer, use_dropout, n_blocks, padding_type, use_bias)
+        self.encoder_seg = self.get_encoder(1, n_downsampling, ngf, norm_layer, use_dropout, n_blocks, padding_type, use_bias)
+        self.decoder_img = self.get_decoder(output_nc, n_downsampling, 2 * ngf, norm_layer, use_bias)  # 2*ngf
+        self.decoder_seg = self.get_decoder(1, n_downsampling, 3 * ngf, norm_layer, use_bias)  # 3*ngf
+
+    def get_encoder(self, input_nc, n_downsampling, ngf, norm_layer, use_dropout, n_blocks, padding_type, use_bias):
+        model = [nn.ReflectionPad2d(3),
+                 nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
+                 norm_layer(ngf),
+                 nn.ReLU(True)]
+
+        for i in range(n_downsampling):
+            mult = 2 ** i
+            model += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                      norm_layer(ngf * mult * 2),
+                      nn.ReLU(True)]
+
+        mult = 2 ** n_downsampling
+        for i in range(n_blocks):
+            model += [ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout, use_bias=use_bias)]
+
+        return nn.Sequential(*model)
+
+    def get_decoder(self, output_nc, n_downsampling, ngf, norm_layer, use_bias):
+        model = []
+        for i in range(n_downsampling):
+            mult = 2**(n_downsampling - i)
+            model += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2), kernel_size=3, stride=2, padding=1, output_padding=1, bias=use_bias),
+                      norm_layer(int(ngf * mult / 2)),
+                      nn.ReLU(True)]
+        model += [nn.ReflectionPad2d(3)]
+        model += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
+        model += [nn.Tanh()]
+        return nn.Sequential(*model)
+
+    def forward(self, inp):
+        # split data
+        img = inp[:, :self.input_nc, :, :]  # (B, CX, W, H)
+        segs = inp[:, self.input_nc:, :, :]  # (B, CA, W, H)
+        mean = (segs+1).mean(0).mean(-1).mean(-1)
+        if mean.sum() == 0:
+            mean[0] = 1  # forward at least one segmentation
+
+        # run encoder
+        enc_img = self.encoder_img(img)
+        enc_segs = list()
+        for i in range(segs.size(1)):
+            if mean[i] > 0:  # skip empty segmentation
+                seg = segs[:, i, :, :].unsqueeze(1)
+                enc_segs.append(self.encoder_seg(seg))
+        enc_segs = torch.cat(enc_segs)
+        enc_segs_sum = torch.sum(enc_segs, dim=0, keepdim=True)  # aggregated set feature
+
+        # run decoder
+        feat = torch.cat([enc_img, enc_segs_sum], dim=1)
+        out = [self.decoder_img(feat)]
+        idx = 0
+        for i in range(segs.size(1)):
+            if mean[i] > 0:
+                enc_seg = enc_segs[idx].unsqueeze(0)  # (1, ngf, w, h)
+                idx += 1  # move to next index
+                feat = torch.cat([enc_seg, enc_img, enc_segs_sum], dim=1)
+                out += [self.decoder_seg(feat)]
+            else:
+                out += [segs[:, i, :, :].unsqueeze(1)]  # skip empty segmentation
+        return torch.cat(out, dim=1)
+
 
 ####################################################################
 #---------------------------  Detector  ----------------------------
@@ -446,6 +665,8 @@ class Detector(nn.Module):
             'toothbrush'
         ]
 
+    # (01.15 delete regions -> dict:[Image])
+    # return boxes -> dict: [[xl, yl, xr, yr]]
     def forward(self, images):
         detects = self.model(images)
 
@@ -458,10 +679,8 @@ class Detector(nn.Module):
         bboxes_scaled = [self.rescale_bboxes(detects['pred_boxes'][0, keep[i]], (images.size(-2), images.size(-1)))
                          for i in range(detects['pred_boxes'].size(0))]
 
-        regions = []
         boxes = []
         for i in range(len(pros)):
-            region = []
             box = []
             for pro, b in zip(pros[i], bboxes_scaled[i]):
                 cl = pro.argmax()
@@ -471,15 +690,10 @@ class Detector(nn.Module):
                     if abs(xr - xl) < 40 or abs(yr - yl) < 40:
                         continue
                     instance = imgs[i].crop(box_numpy)
-                    region.append(instance)
                     box.append(b)
-            regions.append(region)
             boxes.append(box)
 
-        trans = [ToTensor()]
-        trans = Compose(trans)
-        regions = [[trans(reg).unsqueeze(0) for reg in region] for region in regions]
-        return regions, boxes
+        return boxes
 
     def rescale_bboxes(self, out_bbox, size):
         img_w, img_h = size
@@ -493,6 +707,33 @@ class Detector(nn.Module):
              (x_c + 0.5 * w), (y_c + 0.5 * h)]
         return torch.stack(b, dim=1)
 
+####################################################################
+#--------------------------  GAN   Loss  --------------------------
+####################################################################
+# Defines the GAN loss which uses either LSGAN or the regular GAN.
+# When LSGAN is used, it is basically same as MSELoss,
+# but it abstracts away the need to create the target label tensor
+# that has the same size as the input
+class GANLoss(nn.Module):
+    def __init__(self, use_lsgan=True, target_real_label=1.0, target_fake_label=0.0):
+        super(GANLoss, self).__init__()
+        self.register_buffer('real_label', torch.tensor(target_real_label))
+        self.register_buffer('fake_label', torch.tensor(target_fake_label))
+        if use_lsgan:
+            self.loss = nn.MSELoss()
+        else:
+            self.loss = nn.BCELoss()
+
+    def get_target_tensor(self, input, target_is_real):
+        if target_is_real:
+            target_tensor = self.real_label
+        else:
+            target_tensor = self.fake_label
+        return target_tensor.expand_as(input)
+
+    def __call__(self, input, target_is_real):
+        target_tensor = self.get_target_tensor(input, target_is_real)
+        return self.loss(input, target_tensor)
 
 ####################################################################
 #-------------------------- Basic Blocks --------------------------
@@ -511,7 +752,7 @@ class LeakyReLUConv2d(nn.Module):
         if 'norm' == 'Instance':
             model += [nn.InstanceNorm2d(n_out, affine=False)]
 
-        model += [nn.LeakyReLU(inplace=False)]
+        model += [nn.LeakyReLU(inplace=True)]
         self.model = nn.Sequential(*model)
         self.model.apply(gaussian_weights_init)
 
@@ -525,7 +766,7 @@ class ReLUINSConv2d(nn.Module):
             nn.ReflectionPad2d(padding),
             nn.Conv2d(n_in, n_out, kernel_size=kernel_size, stride=stride, padding=0, bias=True),
             nn.InstanceNorm2d(n_out, affine=False),
-            nn.ReLU(inplace=False)
+            nn.ReLU(inplace=True)
         )
         self.model.apply(gaussian_weights_init)
 
@@ -643,7 +884,64 @@ class LayerNorm(nn.Module):
         else:
             return F.layer_norm(x, normalized_shape)
 
+# Define spectral normalization layer
+# Code from Christian Cosgrove's repository
+# https://github.com/christiancosgrove/pytorch-spectral-normalization-gan/blob/master/spectral_normalization.py
+def l2normalize(v, eps=1e-12):
+    return v / (v.norm() + eps)
 
+class SpectralNorm(nn.Module):
+    def __init__(self, module, name='weight', power_iterations=1):
+        super(SpectralNorm, self).__init__()
+        self.module = module
+        self.name = name
+        self.power_iterations = power_iterations
+        if not self._made_params():
+            self._make_params()
+
+    def _update_u_v(self):
+        u = getattr(self.module, self.name + "_u")
+        v = getattr(self.module, self.name + "_v")
+        w = getattr(self.module, self.name + "_bar")
+
+        height = w.data.shape[0]
+        for _ in range(self.power_iterations):
+            v.data = l2normalize(torch.mv(torch.t(w.view(height, -1).data), u.data))
+            u.data = l2normalize(torch.mv(w.view(height, -1).data, v.data))
+
+        sigma = u.dot(w.view(height, -1).mv(v))
+        setattr(self.module, self.name, w / sigma.expand_as(w))
+
+    def _made_params(self):
+        try:
+            u = getattr(self.module, self.name + "_u")
+            v = getattr(self.module, self.name + "_v")
+            w = getattr(self.module, self.name + "_bar")
+            return True
+        except AttributeError:
+            return False
+
+    def _make_params(self):
+        w = getattr(self.module, self.name)
+
+        height = w.data.shape[0]
+        width = w.view(height, -1).data.shape[1]
+
+        u = nn.Parameter(w.data.new(height).normal_(0, 1), requires_grad=False)
+        v = nn.Parameter(w.data.new(width).normal_(0, 1), requires_grad=False)
+        u.data = l2normalize(u.data)
+        v.data = l2normalize(v.data)
+        w_bar = nn.Parameter(w.data)
+
+        del self.module._parameters[self.name]
+
+        self.module.register_parameter(self.name + "_u", u)
+        self.module.register_parameter(self.name + "_v", v)
+        self.module.register_parameter(self.name + "_bar", w_bar)
+
+    def forward(self, *args):
+        self._update_u_v()
+        return self.module.forward(*args)
 
 
 ####################################################################
@@ -666,4 +964,14 @@ def get_scheduler(optimizer, opts, cur_ep=-1):
         return NotImplementedError('no such learn rate policy')
     return scheduler
 
+def get_norm_layer(norm_type='instance'):
+    if norm_type == 'batch':
+        norm_layer = functools.partial(nn.BatchNorm2d, affine=True)
+    elif norm_type == 'instance':
+        norm_layer = functools.partial(nn.InstanceNorm2d, affine=False, track_running_stats=False)
+    elif norm_type == 'none':
+        norm_layer = None
+    else:
+        raise NotImplementedError('normalization layer [%s] is not found' % norm_type)
+    return norm_layer
 

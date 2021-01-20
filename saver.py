@@ -3,6 +3,7 @@ import torchvision
 from tensorboardX import SummaryWriter
 import numpy as np
 from PIL import Image
+import torch
 
 # tensor to PIL Image
 def tensor2img(img):
@@ -53,6 +54,17 @@ class Saver():
             image_dis = torchvision.utils.make_grid(model.image_display,
                                                     nrow=model.image_display.size(0) // 2) / 2 + 0.5
             self.writer.add_image('Image', image_dis, total_it)
+
+            mask_dis = torchvision.utils.make_grid(model.image_mask_display,
+                                                    nrow=model.image_mask_display.size(0) // 2, normalize=True)
+            self.writer.add_image('Mask', mask_dis, total_it)
+
+            if total_it > 0:
+                feature = model.content_x
+                feature = feature.permute(1, 0, 2, 3)
+                img_grid = torchvision.utils.make_grid(feature, normalize=True, scale_each=True, nrow=8)
+                self.writer.add_image('Enc content maps', img_grid, total_it)
+
 
         # save result images
 

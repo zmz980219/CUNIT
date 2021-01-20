@@ -41,16 +41,35 @@ def main():
     print('\n--- train ---')
     #print(model)
     max_it = 500000
-
+    # considering the situation that bugs come out with two modules
+    # working together, perhaps separating training is a better way
     for ep in range(ep0, opts.n_ep):
-        for it, (images_a, images_b) in tqdm(enumerate(train_loader)):
+        for it, data in tqdm(enumerate(train_loader)):
+            # 'A': A, 'B': B, 'A_mask': A_mask, 'B_mask': B_mask, 'A_box': A_box, 'B_box': B_box
+            images_a = data['A']
+            images_b = data['B']
+            masks_a = data['A_mask']
+            masks_b = data['B_mask']
+            boxes_a = data['A_box']
+            boxes_b = data['B_box']
+            person_a = data['A_crop']
+            person_b = data['B_crop']
             if images_a.size(0) != opts.batch_size or images_b.size(0) != opts.batch_size:
                 continue
 
             # input data
             images_a = images_a.cuda(opts.gpu).detach()
             images_b = images_b.cuda(opts.gpu).detach()
-            model.update(images_a, images_b)
+            masks_a = masks_a.cuda(opts.gpu).detach()
+            masks_b = masks_b.cuda(opts.gpu).detach()
+            person_a = person_a.cuda(opts.gpu).detach()
+            person_b = person_b.cuda(opts.gpu).detach()
+            if it % 2 == 0:
+                # train cloth transfer
+                model.update_Cloth(images_a, images_b, masks_a, masks_b, boxes_a, boxes_b)
+            else:
+                # train img style translation
+                model.update(images_a, images_b, masks_a, masks_b, boxes_a, boxes_b, person_a, person_b)
 
             if not opts.no_display_img:
                 saver.write_display(total_it, model)

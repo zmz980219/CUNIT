@@ -34,6 +34,7 @@ class TrainOptions():
                                  help='normalization layer in discriminator [None, Instance]')
         self.parser.add_argument('--dis_spectral_norm', action='store_true',
                                  help='use spectral normalization in discriminator')
+        self.parser.add_argument('--no_dropout', action='store_true', help='no dropout for the generator')
         self.parser.add_argument('--lr_policy', type=str, default='lambda', help='type of learn rate decay')
         self.parser.add_argument('--n_ep', type=int, default=1200, help='number of epochs')  # 400 * d_iter
         self.parser.add_argument('--n_ep_decay', type=int, default=600,
