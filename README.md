@@ -15,3 +15,4 @@ TODO list:
 testing and do whole process once get pth
 perhaps the problem happens at transfering RGB image?
 perhaps training on dress would help?
+try to use pants2skirt dataset?
