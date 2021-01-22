@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image
 from torchvision.transforms import Compose, Resize, RandomCrop, CenterCrop, RandomHorizontalFlip, ToTensor, Normalize
 
+
 class dataset_unpair(data.Dataset):
     def __init__(self, opts):
         # we need raw images, box positions and cloth mask
@@ -47,12 +48,12 @@ class dataset_unpair(data.Dataset):
 
         # setup image transformation
         transforms = [Resize((opts.resize_size, opts.resize_size), Image.BICUBIC)]
-        if opts.phase == 'train':
-            transforms.append(RandomCrop(opts.crop_size))
-        else:
-            transforms.append(CenterCrop(opts.crop_size))
-        if not opts.no_flip:
-            transforms.append(RandomHorizontalFlip())
+        # if opts.phase == 'train':
+        #     transforms.append(RandomCrop(opts.crop_size))
+        # else:
+        #     transforms.append(CenterCrop(opts.crop_size))
+        # if not opts.no_flip:
+        #     transforms.append(RandomHorizontalFlip())
         transforms.append(ToTensor())
         transforms.append(Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]))
         self.transforms = Compose(transforms)
@@ -87,10 +88,15 @@ class dataset_unpair(data.Dataset):
             A_mask = self.mask_transforms(A_mask) * 255.0
             B_mask = self.mask_transforms(B_mask) * 255.0
             # process the mask to get cloth mask, all pixels that satisfy this statement are 1, others are zero
-            cloth_mask_A_numpy = (A_mask.cpu().numpy() == 5).astype(np.int) + (A_mask.cpu().numpy() == 6).astype(
-                np.int) + (A_mask.cpu().numpy() == 7).astype(np.int)
-            cloth_mask_B_numpy = (B_mask.cpu().numpy() == 5).astype(np.int) + (B_mask.cpu().numpy() == 6).astype(
-                np.int) + (B_mask.cpu().numpy() == 7).astype(np.int)
+            # 0 'Background', 1 'Hat', 2 'Hair', 3 'Glove', 4 'Sunglasses', 5 'Upper-clothes', 6 'Dress', 7 'Coat',
+            # 8 'Socks', 9 'Pants', 10 'Jumpsuits', 11 'Scarf', 12 'Skirt', 13 'Face', 14 'Left-arm', 15 'Right-arm',
+            # 16 'Left-leg', 17 'Right-leg', 18 'Left-shoe', 19 'Right-shoe'
+            cloth_mask_A_numpy = (A_mask.cpu().numpy() == 12).astype(np.int)
+            cloth_mask_B_numpy = (B_mask.cpu().numpy() == 9).astype(np.int)
+            # cloth_mask_A_numpy = (A_mask.cpu().numpy() == 5).astype(np.int) + (A_mask.cpu().numpy() == 6).astype(
+            #     np.int) + (A_mask.cpu().numpy() == 7).astype(np.int)
+            # cloth_mask_B_numpy = (B_mask.cpu().numpy() == 5).astype(np.int) + (B_mask.cpu().numpy() == 6).astype(
+            #     np.int) + (B_mask.cpu().numpy() == 7).astype(np.int)
             A_mask = torch.FloatTensor(cloth_mask_A_numpy)
             B_mask = torch.FloatTensor(cloth_mask_B_numpy)
             # need to normalize

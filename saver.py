@@ -51,12 +51,22 @@ class Saver():
             for m in members:
                 self.writer.add_scalar(m, getattr(model, m), total_it)
             # write img
+            # TODO: image_display perhaps is 1 at dimension 1? so it outputs grey image?
+            # return 1 if converted.dtype == np.uint8 else 255
+            # [6, 3, 256, 256]
+            # print('model.image_display size', model.image_display.size())
+            # [6, 1, 256, 256]
+            # print('model.mask_display size', model.image_mask_display.size())
             image_dis = torchvision.utils.make_grid(model.image_display,
                                                     nrow=model.image_display.size(0) // 2) / 2 + 0.5
+            # [3, 518, 776]
+            # print('image_dis size:', image_dis.size())
             self.writer.add_image('Image', image_dis, total_it)
 
             mask_dis = torchvision.utils.make_grid(model.image_mask_display,
-                                                    nrow=model.image_mask_display.size(0) // 2, normalize=True)
+                                                    nrow=model.image_mask_display.size(0) // 2) / 2 + 0.5
+            # [3, 518, 776]
+            # print('mask_dis size:', mask_dis.size())
             self.writer.add_image('Mask', mask_dis, total_it)
 
             if total_it > 0:
