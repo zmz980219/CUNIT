@@ -1,0 +1,1 @@
+python data_preprocess.py --dataroot '/home/yt/projects/CUNIT/testImg' --saveroot '/home/yt/projects/CUNIT/trainA'
