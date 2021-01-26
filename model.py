@@ -16,115 +16,111 @@ class CUNIT(nn.Module):
         # styleSpace means the size of style space
         self.styleSpace = 8
         self.size = opts.crop_size
-        channel = 256
 
-        # Cloth Transfer
-        self.ClothTransfer = networks.ClothTransfer(opts.input_dim_x, opts.input_dim_y, norm='instance', use_dropout=not opts.no_dropout)
-        self.DisClothTransfer = networks.DisClothTransfer(opts.input_dim_x, norm='instance')
         # discriminators 包括区分图片是否是生成的Dx, Dy
         # 区分content属于哪一类的Dc 和 Dic(这两者损失函数不同)
         self.DisX = networks.Discriminator(opts.input_dim_x, norm=opts.dis_norm, sn=opts.dis_spectral_norm)
         self.DisY = networks.Discriminator(opts.input_dim_y, norm=opts.dis_norm, sn=opts.dis_spectral_norm)
         self.DisContent = networks.ContentDiscriminator()
-        # self.DisInsContent = networks.ContentInsDiscriminator()
 
         # encoders 包括style encoders, content encoders
         # 目前采用的是INIT中的实现方式，即Exc和Exci共用一个encoder
         self.EncContent = networks.ContentEncoder(opts.input_dim_x, opts.input_dim_y)
+        self.EncMaskContent = networks.ContentEncoder(1, 1, dim=16)
+        self.DecMaskContent = networks.ContentMaskDecoder(64, 64, 1, 1)
         self.EncStyle = networks.StyleEncoder(opts.input_dim_x, opts.input_dim_y, self.styleSpace)
-
-        # residual block 包括global-level和instance-level, 用来融合content feature和style feature
-        # self.GloResBlock = networks.GlobalLevelResBlock(channel, channel)
-        # self.InsResBlock = networks.InstanceLevelResBlock(channel, channel)
+        self.TransContent = networks.ContentTranslator(dim=256+64, n_blocks=9)
 
         # generator
         self.Gen = networks.Generator(opts.input_dim_x, opts.input_dim_y, nz=self.styleSpace)
-        # input_nc = 256
-        # output_nc = 256
-        # ngf = 64
-        # norm_layer = 'instance'
-        # use_dropout = False
-        # self.GenIns = networks.ResnetGenerator(input_nc, output_nc, ngf)
 
         # optimizers
-        self.DisX_opt = torch.optim.Adam(self.DisX.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
-        self.DisY_opt = torch.optim.Adam(self.DisY.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
-        self.DisContent_opt = torch.optim.Adam(self.DisContent.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
-        # self.DisInsContent_opt = torch.optim.Adam(self.DisInsContent.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
-        self.EncContent_opt = torch.optim.Adam(self.EncContent.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
-        self.EncStyle_opt = torch.optim.Adam(self.EncStyle.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
-        # self.GloResBlock_opt = torch.optim.Adam(self.GloResBlock.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
-        # self.InsResBlock_opt = torch.optim.Adam(self.GloResBlock.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
-        self.Gen_opt = torch.optim.Adam(self.Gen.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
-        # self.GenIns_opt = torch.optim.Adam(self.GenIns.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
-        self.ClothTransfer_opt = torch.optim.Adam(self.ClothTransfer.parameters(), lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
-        self.DisClothTransfer_opt = torch.optim.Adam(self.ClothTransfer.parameters(), lr=lr, betas=(0.5, 0.999),
-                                                  weight_decay=0.0001)
+        self.DisX_opt = torch.optim.Adam([{'params': self.DisX.parameters(), 'initial_lr': lr}], lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
+        self.DisY_opt = torch.optim.Adam([{'params': self.DisY.parameters(), 'initial_lr': lr}], lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
+        self.DisContent_opt = torch.optim.Adam([{'params': self.DisContent.parameters(), 'initial_lr': lr}], lr=lr_dcontent, betas=(0.5, 0.999), weight_decay=0.0001)
+        self.EncContent_opt = torch.optim.Adam([{'params': self.EncContent.parameters(), 'initial_lr': lr}], lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
+        self.EncMaskContent_opt = torch.optim.Adam([{'params': self.EncMaskContent.parameters(), 'initial_lr': lr}], lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
+        self.DecMaskContent_opt = torch.optim.Adam([{'params': self.DecMaskContent.parameters(), 'initial_lr': lr}], lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
+        self.EncStyle_opt = torch.optim.Adam([{'params': self.EncStyle.parameters(), 'initial_lr': lr}], lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
+        self.TransContent_opt = torch.optim.Adam([{'params': self.TransContent.parameters(), 'initial_lr': lr}], lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
+        self.Gen_opt = torch.optim.Adam([{'params': self.Gen.parameters(), 'initial_lr': lr}], lr=lr, betas=(0.5, 0.999), weight_decay=0.0001)
 
         # detector
         # self.Detector = networks.Detector()
 
         # Setup the loss function for training
         self.criterionL1 = torch.nn.L1Loss()
-        self.criterionGAN = networks.GANLoss(use_lsgan=True)
-        self.criterionCyc = torch.nn.L1Loss()
-        self.criterionIdt = torch.nn.L1Loss()
 
     def initialize(self):
         self.DisX.apply(networks.gaussian_weights_init)
         self.DisY.apply(networks.gaussian_weights_init)
         self.DisContent.apply(networks.gaussian_weights_init)
-        # self.DisInsContent.apply(networks.gaussian_weights_init)
         self.EncContent.apply(networks.gaussian_weights_init)
+        self.EncMaskContent.apply(networks.gaussian_weights_init)
+        self.DecMaskContent.apply(networks.gaussian_weights_init)
         self.EncStyle.apply(networks.gaussian_weights_init)
-        # self.GloResBlock.apply(networks.gaussian_weights_init)
-        # self.InsResBlock.apply(networks.gaussian_weights_init)
+        self.TransContent.apply(networks.gaussian_weights_init)
         self.Gen.apply(networks.gaussian_weights_init)
-        # self.GenIns.apply(networks.gaussian_weights_init)
-        # self.Detector.eval()
 
     def set_scheduler(self, opts, last_ep=0):
         self.DisX_sch = networks.get_scheduler(self.DisX_opt, opts, last_ep)
         self.DisY_sch = networks.get_scheduler(self.DisY_opt, opts, last_ep)
         self.DisContent_sch = networks.get_scheduler(self.DisContent_opt, opts, last_ep)
-        # self.DisInsContent_sch = networks.get_scheduler(self.DisInsContent_opt, opts, last_ep)
         self.EncContent_sch = networks.get_scheduler(self.EncContent_opt, opts, last_ep)
+        self.EncMaskContent_sch = networks.get_scheduler(self.EncMaskContent_opt, opts, last_ep)
+        self.DecMaskContent_sch = networks.get_scheduler(self.DecMaskContent_opt, opts, last_ep)
         self.EncStyle_sch = networks.get_scheduler(self.EncStyle_opt, opts, last_ep)
-        # self.GloResBlock_sch = networks.get_scheduler(self.GloResBlock_opt, opts, last_ep)
-        # self.InsResBlock_sch = networks.get_scheduler(self.InsResBlock_opt, opts, last_ep)
+        self.TransContent_sch = networks.get_scheduler(self.TransContent_opt, opts, last_ep)
         self.Gen_sch = networks.get_scheduler(self.Gen_opt, opts, last_ep)
-        # self.GenIns_sch = networks.get_scheduler(self.GenIns_opt, opts, last_ep)
-        self.ClothTransfer_sch = networks.get_scheduler(self.ClothTransfer_opt, opts, last_ep)
-        self.DisClothTransfer_sch = networks.get_scheduler(self.DisClothTransfer_opt, opts, last_ep)
 
     def setgpu(self, gpu):
         self.gpu = gpu
         self.DisX.cuda(self.gpu)
         self.DisY.cuda(self.gpu)
         self.DisContent.cuda(self.gpu)
-        # self.DisInsContent.cuda(self.gpu)
         self.EncContent.cuda(self.gpu)
+        self.EncMaskContent.cuda(self.gpu)
+        self.DecMaskContent.cuda(self.gpu)
         self.EncStyle.cuda(self.gpu)
-        # self.GloResBlock.cuda(self.gpu)
-        # self.InsResBlock.cuda(self.gpu)
+        self.TransContent.cuda(self.gpu)
         self.Gen.cuda(self.gpu)
-        # self.GenIns.cuda(self.gpu)
-        # self.Detector.cuda(self.gpu)
-        self.ClothTransfer.cuda(self.gpu)
-        self.DisClothTransfer.cuda(self.gpu)
-        self.criterionGAN.cuda(self.gpu)
 
     def update_lr(self):
         self.DisX_sch.step()
         self.DisY_sch.step()
         self.DisContent_sch.step()
-        self.DisInsContent_sch.step()
         self.EncContent_sch.step()
+        self.EncMaskContent_sch.step()
+        self.DecMaskContent_sch.step()
         self.EncStyle_sch.step()
+        self.TransContent_sch.step()
         self.Gen_sch.step()
-        self.GenIns_sch.step()
-        self.ClothTransfer_sch.step()
-        self.DisClothTransfer_sch.step()
+
+    def save(self, filename, ep, total_it):
+        state = {
+            'DisX': self.DisX.state_dict(),
+            'DisY': self.DisY.state_dict(),
+            'DisContent': self.DisContent.state_dict(),
+            'EncContent': self.EncContent.state_dict(),
+            'EncMaskContent': self.EncMaskContent.state_dict(),
+            'DecMaskContent': self.DecMaskContent.state_dict(),
+            'EncStyle': self.EncStyle.state_dict(),
+            'TransContent': self.TransContent.state_dict(),
+            'Gen': self.Gen.state_dict(),
+            'DisX_opt': self.DisX_opt.state_dict(),
+            'DisY_opt': self.DisY_opt.state_dict(),
+            'DisContent_opt': self.DisContent_opt.state_dict(),
+            'EncContent_opt': self.EncContent_opt.state_dict(),
+            'EncMaskContent_opt': self.EncMaskContent_opt.state_dict(),
+            'DecMaskContent_opt': self.DecMaskContent_opt.state_dict(),
+            'EncStyle_opt': self.EncStyle_opt.state_dict(),
+            'TransContent_opt': self.TransContent_opt.state_dict(),
+            'Gen_opt': self.Gen_opt.state_dict(),
+            'ep': ep,
+            'total_it': total_it
+        }
+        torch.save(state, filename)
+        return
 
     def resume(self, model_dir, train=True):
         checkpoint = torch.load(model_dir)
@@ -133,11 +129,22 @@ class CUNIT(nn.Module):
             self.DisContent.load_state_dict(checkpoint['DisContent'])
             self.DisX.load_state_dict(checkpoint['DisX'])
             self.DisY.load_state_dict(checkpoint['DisY'])
-            self.EncContent.load_state_dict(checkpoint['EncContent'])
-            self.EncStyle.load_state_dict(checkpoint['EncStyle'])
-            self.Gen.load_state_dict(checkpoint['Gen'])
-            self.ClothTransfer.load_state_dict(checkpoint['ClothTransfer'])
-            self.DisClothTransfer.load_state_dict(checkpoint['DisClothTransfer'])
+            self.DisContent_opt.load_state_dict(checkpoint['DisContent_opt'])
+            self.DisX_opt.load_state_dict(checkpoint['DisX_opt'])
+            self.DisY_opt.load_state_dict(checkpoint['DisY_opt'])
+            self.EncContent_opt.load_state_dict(checkpoint['EncContent_opt'])
+            self.EncMaskContent_opt.load_state_dict(checkpoint['EncMaskContent_opt'])
+            self.DecMaskContent_opt.load_state_dict(checkpoint['DecMaskContent_opt'])
+            self.EncStyle_opt.load_state_dict(checkpoint['EncStyle_opt'])
+            self.TransContent_opt.load_state_dict(checkpoint['TransContent_opt'])
+            self.Gen_opt.load_state_dict(checkpoint['Gen_opt'])
+        self.EncContent.load_state_dict(checkpoint['EncContent'])
+        self.EncMaskContent.load_state_dict(checkpoint['EncMaskContent'])
+        self.DecMaskContent.load_state_dict(checkpoint['DecMaskContent'])
+        self.EncStyle.load_state_dict(checkpoint['EncStyle'])
+        self.TransContent.load_state_dict(checkpoint['TransContent'])
+        self.Gen.load_state_dict(checkpoint['Gen'])
+
         return checkpoint['ep'], checkpoint['total_it']
 
     # TODO : 先不引入no ms
@@ -145,6 +152,7 @@ class CUNIT(nn.Module):
     # second div a' into style and content and do cycle style transfer
     # I also need a detector to detect that person's position for further loss calculation and test process
     # TODO: add a detector and test the person's position and the positions in the generated results
+    # TODO: add a decoder to visualize the process of converting mask?
     def forward(self):
         # get input images
         # for gpu capacity consideration, I only process one image at one time
@@ -158,71 +166,63 @@ class CUNIT(nn.Module):
         self.real_y = real_y[0:half_size]
         self.real_x_mask = self.mask_x[0:half_size]
         self.real_y_mask = self.mask_y[0:half_size]
-        self.real_x_box = self.box_x[0:half_size]
-        self.real_y_box = self.box_y[0:half_size]
-        self.real_x_person = self.person_x[0:half_size]
-        self.real_y_person = self.person_y[0:half_size]
+        # self.real_x_box = self.box_x[0:half_size]
+        # self.real_y_box = self.box_y[0:half_size]
 
         # TODO: too long processing way may be unuseful for the total process
         # content_x size: 1, 256, 64, 64
         self.content_x, self.content_y = self.EncContent(self.real_x, self.real_y)
         self.style_x, self.style_y = self.EncStyle(self.real_x, self.real_y)
-        self.content_person_x, self.content_person_y = self.EncContent(self.real_x_person, self.real_y_person)
-        self.style_person_x, self.style_person_y = self.EncStyle(self.real_x_person, self.real_y_person)
 
         # random style code
         self.style_random = self.get_random(self.real_x.size(0), self.styleSpace, 'gauss')
 
-        # TODO: I choose to do style transfer for image and crop image both
-        #  to train the Generator not to transfer people's style, the idea is learned from INIT
-        # TODO: to improve speed, perhaps it would be better to make codes concatenated
-        input_content_x = torch.cat((self.content_x, self.content_y, self.content_y), dim=0)
+        # do content transfer
+        # convert a black-white img to 256 dimensions seems bad
+        # TODO: if results are bad, change 256 to a smaller number by using a small network
+        self.content_x_mask, self.content_y_mask = self.EncMaskContent(self.real_x_mask, self.real_y_mask)
+        # print('content_x_mask size:', self.content_x_mask.size())
+        self.fake_x_mask, self.fake_y_mask = self.DecMaskContent(self.content_x_mask, self.content_y_mask)
+        # print('fake_x_mask size:', self.fake_x_mask.size())
+        content_x_merge = torch.cat((self.content_x, self.content_x_mask), dim=1)
+        content_y_merge = torch.cat((self.content_y, self.content_y_mask), dim=1)
+        content_x_merge_output, content_y_merge_output = self.TransContent(content_x_merge, content_y_merge)
+        self.content_x_new, self.content_x_mask_new = torch.split(content_x_merge_output, self.content_x.size(1), dim=1)
+        self.content_y_new, self.content_y_mask_new = torch.split(content_y_merge_output, self.content_y.size(1), dim=1)
+        self.fake_x_mask_new, self.fake_y_mask_new = self.DecMaskContent(self.content_x_mask_new, self.content_y_mask_new)
+
+        input_content_x = torch.cat((self.content_x_new, self.content_y_new, self.content_y_new), dim=0)
         input_style_x = torch.cat((self.style_x, self.style_x, self.style_random), dim=0)
         output_x = self.Gen.forward_x(input_content_x, input_style_x)
         self.self_recon_x, self.cross_fake_x, self.cross_fake_x_random = torch.split(output_x, self.content_x.size(0),
                                                                                      dim=0)
 
-        input_content_y = torch.cat((self.content_y, self.content_x, self.content_x), dim=0)
+        input_content_y = torch.cat((self.content_y_new, self.content_x_new, self.content_x_new), dim=0)
         input_style_y = torch.cat((self.style_y, self.style_y, self.style_random), dim=0)
         output_y = self.Gen.forward_y(input_content_y, input_style_y)
         self.self_recon_y, self.cross_fake_y, self.cross_fake_y_random = torch.split(output_y, self.content_x.size(0),
                                                                                      dim=0)
 
-        input_content_person_x = torch.cat((self.content_person_x, self.content_person_y, self.content_person_y), dim=0)
-        input_style_person_x = torch.cat((self.style_person_x, self.style_person_x, self.style_random), dim=0)
-        output_person_x = self.Gen.forward_x(input_content_person_x, input_style_person_x)
-        self.self_recon_person_x, self.cross_fake_person_x, self.cross_fake_person_x_random = torch.split(
-            output_person_x, self.content_person_x.size(0), dim=0)
-
-        input_content_person_y = torch.cat((self.content_person_y, self.content_person_x, self.content_person_x), dim=0)
-        input_style_person_y = torch.cat((self.style_person_y, self.style_person_y, self.style_random), dim=0)
-        output_person_y = self.Gen.forward_y(input_content_person_y, input_style_person_y)
-        self.self_recon_person_y, self.cross_fake_person_y, self.cross_fake_person_y_random = torch.split(
-            output_person_y, self.content_person_y.size(0), dim=0)
-
         # this line looks odd but it means cross_fake_y is combined by content x and style y
         self.content_fake_x, self.content_fake_y = self.EncContent.forward(self.cross_fake_y, self.cross_fake_x)
-        self.content_fake_person_x, self.content_fake_person_y = self.EncContent.forward(self.cross_fake_person_x,
-                                                                                       self.cross_fake_person_y)
         self.style_fake_x, self.style_fake_y = self.EncStyle.forward(self.cross_fake_x, self.cross_fake_y)
-        self.style_fake_person_x, self.style_fake_person_y = self.EncStyle.forward(self.cross_fake_person_x,
-                                                                                       self.cross_fake_person_y)
 
         # reconstruct images
         self.recon_fake_x = self.Gen.forward_x(self.content_fake_x, self.style_fake_x)
-        self.recon_fake_person_x = self.Gen.forward_x(self.content_fake_person_x, self.style_fake_person_x)
         self.recon_fake_y = self.Gen.forward_y(self.content_fake_y, self.style_fake_y)
-        self.recon_fake_person_y = self.Gen.forward_y(self.content_fake_person_y, self.style_fake_person_y)
 
         self.style_random_x, self.style_random_y = self.EncStyle(self.cross_fake_x_random, self.cross_fake_y_random)
 
         # for display TODO: need to show more generated results
         self.image_display = torch.cat((self.real_x[0:1].detach().cpu(), self.cross_fake_y[0:1].detach().cpu(),
-                                        self.cross_fake_y_random[0:1].detach().cpu(), self.self_recon_x[0:1].detach().cpu(),
                                         self.recon_fake_x[0:1].detach().cpu(),
                                         self.real_y[0:1].detach().cpu(), self.cross_fake_x[0:1].detach().cpu(),
-                                        self.cross_fake_x_random[0:1].detach().cpu(), self.self_recon_y[0:1].detach().cpu(),
                                         self.recon_fake_y[0:1].detach().cpu()), dim=0)
+
+        self.mask_display = torch.cat((self.real_x_mask[0:1].detach().cpu(), self.fake_x_mask[0:1].detach().cpu(),
+                                       self.fake_x_mask_new[0:1].detach().cpu(),
+                                       self.real_y_mask[0:1].detach().cpu(), self.fake_y_mask[0:1].detach().cpu(),
+                                       self.fake_y_mask_new[0:1].detach().cpu()), dim=0)
 
     def split(self, x):
         """Split data into image and mask(only for 3-channel image)"""
@@ -339,62 +339,51 @@ class CUNIT(nn.Module):
         for param in net.parameters():
             param.requires_grad = requires_grad
 
-    def update(self, images_x, images_y, masks_x, masks_y, boxes_x, boxes_y, person_x, person_y):
+    def update(self, images_x, images_y, masks_x, masks_y):
         self.input_x = images_x
         self.input_y = images_y
         self.mask_x = masks_x
         self.mask_y = masks_y
-        self.box_x = boxes_x
-        self.box_y = boxes_y
-        self.person_x = person_x
-        self.person_y = person_y
+        # self.box_x = boxes_x
+        # self.box_y = boxes_y
+        # self.person_x = person_x
+        # self.person_y = person_y
 
         self.forward()
 
         # update DisX
-        # TODO: use real_x or cloth_x to trainD?
         self.DisX_opt.zero_grad()
         loss_D_X = self.backwardD(self.DisX, self.real_x, self.cross_fake_y)
-        loss_D_person_X = self.backwardD(self.DisX, self.real_x_person, self.cross_fake_person_y)
-        self.DisX_loss = loss_D_X.item() + loss_D_person_X.item()
+        self.DisX_loss = loss_D_X.item()
         self.DisX_opt.step()
 
         # update DisY
         self.DisY_opt.zero_grad()
         loss_D_Y = self.backwardD(self.DisY, self.real_y, self.cross_fake_x)
-        loss_D_person_Y = self.backwardD(self.DisY, self.real_y_person, self.cross_fake_person_x)
-        self.DisY_loss = loss_D_Y.item() + loss_D_person_Y.item()
+        self.DisY_loss = loss_D_Y.item()
         self.DisY_opt.step()
 
         # update DisContent
         self.DisContent_opt.zero_grad()
         loss_DisContent = self.backwardDContent(self.DisContent, self.content_x, self.content_y)
-        loss_DisContent_person = self.backwardDContent(self.DisContent, self.content_person_x, self.content_person_y)
-        self.DisContent_loss = loss_DisContent.item() + loss_DisContent_person.item()
+        self.DisContent_loss = loss_DisContent.item()
         # nn.utils.clip_grad_norm_(self.DisContent.parameters(), 5)
         self.DisContent_opt.step()
 
-        # update DisInsContent
-        # self.DisInsContent_opt.zero_grad()
-        # loss_DisInsContent_x = self.backwardDInsContent(self.DisInsContent, self.content_xi, self.new_content_xi)
-        # loss_DisInsContent_y = self.backwardDInsContent(self.DisInsContent, self.new_content_yi, self.content_yi)
-        # loss_DisInsContent = loss_DisInsContent_x + loss_DisInsContent_y
-        # if loss_DisInsContent != 0:
-        #     loss_DisInsContent.backward()
-        #     self.DisInsContent_loss = loss_DisInsContent.item()
-        # else:
-        #     self.DisInsContent_loss = 0
-        # self.DisInsContent_opt.step()
 
         # update Encoder and Gen
         self.EncContent_opt.zero_grad()
+        self.EncMaskContent_opt.zero_grad()
+        self.DecMaskContent_opt.zero_grad()
         self.EncStyle_opt.zero_grad()
-        # self.GloResBlock_opt.zero_grad()
+        self.TransContent_opt.zero_grad()
         self.Gen_opt.zero_grad()
         self.backwardEG()
         self.EncContent_opt.step()
+        self.EncMaskContent_opt.step()
+        self.DecMaskContent_opt.step()
         self.EncStyle_opt.step()
-        # self.GloResBlock_opt.step()
+        self.TransContent_opt.step()
         self.Gen_opt.step()
 
     def update_Cloth(self, images_x, images_y, masks_x, masks_y, boxes_x, boxes_y):
@@ -523,14 +512,10 @@ class CUNIT(nn.Module):
         # content adv loss for gen
         loss_Gen_content_x = self.backwardG_content(self.content_x)
         loss_Gen_content_y = self.backwardG_content(self.content_y)
-        loss_Gen_content_person_x = self.backwardG_content(self.content_person_x)
-        loss_Gen_content_person_y = self.backwardG_content(self.content_person_y)
 
         # domain adversarial loss
         loss_Gen_X = self.backwardG(self.cross_fake_y, self.DisX)
         loss_Gen_Y = self.backwardG(self.cross_fake_x, self.DisY)
-        loss_Gen_person_X = self.backwardG(self.cross_fake_person_y, self.DisX)
-        loss_Gen_person_Y = self.backwardG(self.cross_fake_person_x, self.DisY)
 
         # KL loss
         loss_KL_style_x = self._l2_regularize(self.style_x) * 0.01
@@ -541,38 +526,37 @@ class CUNIT(nn.Module):
         # cross cycle consistency loss
         loss_Gen_L1_recon_x = self.criterionL1(self.recon_fake_x, self.real_x) * 10
         loss_Gen_L1_recon_y = self.criterionL1(self.recon_fake_y, self.real_y) * 10
-        loss_Gen_L1_recon_person_x = self.criterionL1(self.recon_fake_person_x, self.real_x_person) * 10
-        loss_Gen_L1_recon_person_y = self.criterionL1(self.recon_fake_person_y, self.real_y_person) * 10
 
         # self-reconstruction loss
         loss_Gen_L1_self_x = self.criterionL1(self.self_recon_x, self.real_x) * 10
         loss_Gen_L1_self_y = self.criterionL1(self.self_recon_y, self.real_y) * 10
-        loss_Gen_L1_self_person_x = self.criterionL1(self.self_recon_person_x, self.real_x_person) * 10
-        loss_Gen_L1_self_person_y = self.criterionL1(self.self_recon_person_y, self.real_y_person) * 10
 
         # latent regression loss
         loss_LR_x = torch.mean(torch.abs(self.style_random_x - self.style_random)) * 10
         loss_LR_y = torch.mean(torch.abs(self.style_random_y - self.style_random)) * 10
 
-        # person style consistency loss
-        loss_style_person_x = torch.mean(torch.abs(self.style_fake_person_x - self.style_person_x)) * 20
-        loss_style_person_y = torch.mean(torch.abs(self.style_fake_person_y - self.style_person_y)) * 20
+        # content convert loss
+        loss_TransCon_x = self.criterionL1(self.content_x_mask_new, self.content_y_mask) * 30
+        loss_TransCon_y = self.criterionL1(self.content_y_mask_new, self.content_x_mask) * 30
 
-        # instance feature generator loss
-        # loss_InsGen_Y = self.backwardInsGy(self.new_content_xi, self.DisInsContent) * 50
-        # loss_InsGen_X = self.backwardInsGx(self.new_content_yi, self.DisInsContent) * 50
+        loss_Mask_x = self.criterionL1(self.fake_x_mask, self.real_x_mask) * 10
+        loss_Mask_y = self.criterionL1(self.fake_y_mask, self.real_y_mask) * 10
+        # new mask loss
+        # loss_NMask_x = self.criterionL1(self.fake_x_mask_new, self.real_y_mask) * 50
+        # loss_NMask_y = self.criterionL1(self.fake_y_mask_new, self.real_x_mask) * 50
+        loss_NMask_x = torch.abs((torch.sum(self.fake_x_mask_new > 0) - torch.sum(self.real_y_mask > 0)))
+        loss_NMask_y = torch.abs((torch.sum(self.fake_y_mask_new > 0) - torch.sum(self.real_x_mask > 0)))
 
-        # loss_Gen = loss_Gen_content_x + loss_Gen_content_y + loss_Gen_X + loss_Gen_Y + \
-        #     loss_KL_content_x + loss_KL_content_y + loss_KL_style_x + loss_KL_style_y + \
-        #     loss_Gen_L1_recon_x + loss_Gen_L1_recon_y + loss_Gen_L1_self_x + loss_Gen_L1_self_y + \
-        #     loss_LR_x + loss_LR_y + loss_InsGen_X + loss_InsGen_Y
+        # content_consistency loss
+        loss_CC_content_x = self.criterionL1(self.content_x_new, self.content_x) * 10
+        loss_CC_content_y = self.criterionL1(self.content_y_new, self.content_y) * 10
+
+
         loss_Gen = loss_Gen_content_x + loss_Gen_content_y + loss_Gen_X + loss_Gen_Y + \
                    loss_KL_content_x + loss_KL_content_y + loss_KL_style_x + loss_KL_style_y + \
                    loss_Gen_L1_recon_x + loss_Gen_L1_recon_y + loss_Gen_L1_self_x + loss_Gen_L1_self_y + \
-                   loss_LR_x + loss_LR_y + loss_Gen_L1_recon_person_x + loss_Gen_L1_recon_person_y +\
-                   loss_Gen_L1_self_person_x + loss_Gen_L1_self_person_y + loss_Gen_person_X + \
-                   loss_Gen_person_Y + loss_Gen_content_person_x + loss_Gen_content_person_y +\
-                   loss_style_person_x + loss_style_person_y
+                   loss_LR_x + loss_LR_y + loss_TransCon_x + loss_TransCon_y + loss_CC_content_x + loss_CC_content_y + \
+                   loss_Mask_x + loss_Mask_y + loss_NMask_x + loss_NMask_y
         loss_Gen.backward()
 
         self.Gen_loss_X = loss_Gen_X.item()
@@ -590,8 +574,14 @@ class CUNIT(nn.Module):
         self.Gen_loss = loss_Gen.item()
         self.LR_loss_x = loss_LR_x.item()
         self.LR_loss_y = loss_LR_y.item()
-        self.Style_loss_x = loss_style_person_x.item()
-        self.Style_loss_y = loss_style_person_y.item()
+        self.TransCon_loss_x = loss_TransCon_x.item()
+        self.TransCon_loss_y = loss_TransCon_y.item()
+        self.Mask_loss_x = loss_Mask_x.item()
+        self.Mask_loss_y = loss_Mask_y.item()
+        self.NMask_loss_x = loss_NMask_x.item()
+        self.NMask_loss_y = loss_NMask_y.item()
+        self.CC_loss_x = loss_CC_content_x.item()
+        self.CC_loss_y = loss_CC_content_y.item()
 
     def backwardG(self, fake_image, netD):
         outs_fake = netD.forward(fake_image)
@@ -642,43 +632,16 @@ class CUNIT(nn.Module):
         style = torch.randn(batchsize, nz).cuda(self.gpu)
         return style
 
-    def save(self, filename, ep, total_it):
-        state = {
-            'DisX': self.DisX.state_dict(),
-            'DisY': self.DisY.state_dict(),
-            'DisContent': self.DisContent.state_dict(),
-            'EncContent': self.EncContent.state_dict(),
-            'EncStyle': self.EncStyle.state_dict(),
-            'Gen': self.Gen.state_dict(),
-            'ClothTransfer': self.ClothTransfer.state_dict(),
-            'DisClothTransfer': self.DisClothTransfer.state_dict(),
-            'DisX_opt': self.DisX_opt.state_dict(),
-            'DisY_opt': self.DisY_opt.state_dict(),
-            'DisContent_opt': self.DisContent_opt.state_dict(),
-            'EncContent_opt': self.EncContent_opt.state_dict(),
-            'EncStyle_opt': self.EncStyle_opt.state_dict(),
-            'Gen_opt': self.Gen_opt.state_dict(),
-            'ClothTransfer_opt': self.ClothTransfer_opt.state_dict(),
-            'DisClothTransfer_opt': self.DisClothTransfer.state_dict(),
-            'ep': ep,
-            'total_it': total_it
-        }
-        torch.save(state, filename)
-        return
-
     def assemble_outputs(self):
         # TODO: do whole process and output
-        with torch.no_grad():
-            content_x, content_y = self.EncContent(self.cloth_y, self.cloth_x)
-            style_x, style_y = self.EncStyle(self.cloth_y, self.cloth_x)
-            image_x2y = self.Gen.forward_y(content_x, style_y)
-            image_y2x = self.Gen.forward_x(content_y, style_x)
         images_x = self.normalize_image(self.real_x).detach()
         images_y = self.normalize_image(self.real_y).detach()
-        images_u = self.normalize_image(image_x2y).detach()
-        images_v = self.normalize_image(image_y2x).detach()
-        row1 = torch.cat((images_x[0:1, ::], images_u[0:1, ::]), dim=3)
-        row2 = torch.cat((images_y[0:1, ::], images_v[0:1, ::]), dim=3)
+        images_u = self.normalize_image(self.cross_fake_y).detach()
+        images_v = self.normalize_image(self.cross_fake_x).detach()
+        images_recon_x = self.normalize_image(self.recon_fake_x).detach()
+        images_recon_y = self.normalize_image(self.recon_fake_y).detach()
+        row1 = torch.cat((images_x[0:1, ::], images_u[0:1, ::], images_recon_x[0:1, ::]), dim=3)
+        row2 = torch.cat((images_y[0:1, ::], images_v[0:1, ::], images_recon_y[0:1, ::]), dim=3)
         return torch.cat((row1, row2), dim=2)
 
     def normalize_image(self, x):

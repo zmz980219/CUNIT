@@ -63,17 +63,27 @@ class Saver():
             # print('image_dis size:', image_dis.size())
             self.writer.add_image('Image', image_dis, total_it)
 
-            mask_dis = torchvision.utils.make_grid(model.image_mask_display,
-                                                    nrow=model.image_mask_display.size(0) // 2) / 2 + 0.5
-            # [3, 518, 776]
-            # print('mask_dis size:', mask_dis.size())
+            mask_dis = torchvision.utils.make_grid(model.mask_display,
+                                                    nrow=model.mask_display.size(0) // 2) / 2 + 0.5
             self.writer.add_image('Mask', mask_dis, total_it)
 
-            if total_it > 0:
-                feature = model.content_x
-                feature = feature.permute(1, 0, 2, 3)
-                img_grid = torchvision.utils.make_grid(feature, normalize=True, scale_each=True, nrow=8)
-                self.writer.add_image('Enc content maps', img_grid, total_it)
+            feature_image = model.content_x
+            feature_image = feature_image.permute(1, 0, 2, 3)
+            # num,1,64,64
+            num = 64
+            feature_image = feature_image[:num]
+            feature_mask = model.content_x_mask
+            feature_mask = feature_mask.permute(1, 0, 2, 3)
+            feature_mask = feature_mask[:num]
+            feature = torch.cat((feature_image, feature_mask), dim=0)
+            grid = torchvision.utils.make_grid(feature, normalize=True, scale_each=True, nrow=num)
+            self.writer.add_image('feature map', grid, total_it)
+
+            # if total_it > 0:
+            #     feature = model.content_x
+            #     feature = feature.permute(1, 0, 2, 3)
+            #     img_grid = torchvision.utils.make_grid(feature, normalize=True, scale_each=True, nrow=8)
+            #     self.writer.add_image('Enc content maps', img_grid, total_it)
 
 
         # save result images
