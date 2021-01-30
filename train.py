@@ -1,3 +1,12 @@
+# 0124 new version
+# remove ClothTransfer and DisClothTransfer and losses involved
+# add a new part to transfer content information, the content information mentioned is concatenated by
+# image content and mask content
+# add new loss function to guide the running of content transfer
+# TODO: keep the original scale? 400, 600 -> 200, 300
+# TODO: fuse content encoder into ones? and cancel the content translator(cause we already have resblock in encoder
+# TODO: add a mask discriminator?
+# TODO: fuse DecMaskContent into generator?(delete DecMaskContent
 import torch
 import torchvision
 import os
@@ -7,7 +16,6 @@ from model import CUNIT
 from torchvision import transforms
 from tqdm import tqdm
 from saver import Saver
-unloader = transforms.ToPILImage()
 
 # tensorboard --logdir logs/#name# --bind_all
 def main():
@@ -39,7 +47,7 @@ def main():
 
     # train
     print('\n--- train ---')
-    #print(model)
+    # print(model)
     max_it = 500000
     # considering the situation that bugs come out with two modules
     # working together, perhaps separating training is a better way
@@ -50,10 +58,10 @@ def main():
             images_b = data['B']
             masks_a = data['A_mask']
             masks_b = data['B_mask']
-            boxes_a = data['A_box']
-            boxes_b = data['B_box']
-            person_a = data['A_crop']
-            person_b = data['B_crop']
+            # boxes_a = data['A_box']
+            # boxes_b = data['B_box']
+            # person_a = data['A_crop']
+            # person_b = data['B_crop']
             if images_a.size(0) != opts.batch_size or images_b.size(0) != opts.batch_size:
                 continue
 
@@ -62,14 +70,9 @@ def main():
             images_b = images_b.cuda(opts.gpu).detach()
             masks_a = masks_a.cuda(opts.gpu).detach()
             masks_b = masks_b.cuda(opts.gpu).detach()
-            person_a = person_a.cuda(opts.gpu).detach()
-            person_b = person_b.cuda(opts.gpu).detach()
-            if it % 2 == 0:
-                # train cloth transfer
-                model.update_Cloth(images_a, images_b, masks_a, masks_b, boxes_a, boxes_b)
-            else:
-                # train img style translation
-                model.update(images_a, images_b, masks_a, masks_b, boxes_a, boxes_b, person_a, person_b)
+            # person_a = person_a.cuda(opts.gpu).detach()
+            # person_b = person_b.cuda(opts.gpu).detach()
+            model.update(images_a, images_b, masks_a, masks_b)
 
             if not opts.no_display_img:
                 saver.write_display(total_it, model)

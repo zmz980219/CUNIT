@@ -174,17 +174,71 @@ class NLayerSetDiscriminator(nn.Module):
         out = self.classifier(feat)
         return out
 
+class MaskClassifier(nn.Module):
+    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.InstanceNorm2d, use_sigmoid=False):
+        super(MaskClassifier, self).__init__()
+        self.input_nc = input_nc
+        kw = 4
+        padw = 1
+        self.feature_mask = self.get_feature_extractor(1, ndf, n_layers, kw, padw, norm_layer, True)
+        self.classifier = self.get_classifier(ndf, n_layers, kw, padw, norm_layer, use_sigmoid)
+
+    def get_feature_extractor(self, input_nc, ndf, n_layers, kw, padw, norm_layer, use_bias):
+        model = [
+            # Use spectral normalization
+            SpectralNorm(nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw)),
+            nn.LeakyReLU(0.2, True)
+        ]
+        nf_mult = 1
+        nf_mult_prev = 1
+        for n in range(1, n_layers):
+            nf_mult_prev = nf_mult
+            nf_mult = min(2 ** n, 8)
+            model += [
+                # Use spectral normalization
+                SpectralNorm(nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=2, padding=padw,
+                                       bias=use_bias)),
+                norm_layer(ndf * nf_mult),
+                nn.LeakyReLU(0.2, True)
+            ]
+        return nn.Sequential(*model)
+
+    def get_classifier(self, ndf, n_layers, kw, padw, norm_layer, use_sigmoid):
+        nf_mult_prev = min(2 ** (n_layers - 1), 8)
+        nf_mult = min(2 ** n_layers, 8)
+        model = [SpectralNorm(nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult, kernel_size=kw, stride=1, padding=padw)),
+                   norm_layer(ndf * nf_mult),
+                   nn.LeakyReLU(0.2, True),
+                   SpectralNorm(nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw))
+                   ]
+        if use_sigmoid:
+            model += [nn.Sigmoid()]
+        return nn.Sequential(*model)
+
+    def forward(self, x):
+        feature = self.feature_mask(x)
+        out = self.classifier(feature)
+        return out
+
 ####################################################################
 #---------------------------- Encoders -----------------------------
 ####################################################################
 class ContentEncoder(nn.Module):
-    def __init__(self, input_dim_x, input_dim_y):
+    def __init__(self, input_dim_x, input_dim_y, dim=64):
         super(ContentEncoder, self).__init__()
         enc_X = []
         enc_Y = []
-        dim = 64
         enc_X += [LeakyReLUConv2d(input_dim_x, dim, kernel_size=7, stride=1, padding=3)]
         enc_Y += [LeakyReLUConv2d(input_dim_y, dim, kernel_size=7, stride=1, padding=3)]
+        self.imageConvX = nn.Sequential(*enc_X)
+        self.imageConvY = nn.Sequential(*enc_Y)
+        enc_X = [LeakyReLUConv2d(1, dim, kernel_size=7, stride=1, padding=3)]
+        enc_Y = [LeakyReLUConv2d(1, dim, kernel_size=7, stride=1, padding=3)]
+        self.maskConvX = nn.Sequential(*enc_X)
+        self.maskConvY = nn.Sequential(*enc_Y)
+
+        enc_X = []
+        enc_Y = []
         for i in range(1, 3):
             enc_X += [ReLUINSConv2d(dim, dim * 2, kernel_size=3, stride=2, padding=1)]
             enc_Y += [ReLUINSConv2d(dim, dim * 2, kernel_size=3, stride=2, padding=1)]
@@ -203,19 +257,35 @@ class ContentEncoder(nn.Module):
         self.conv_share = nn.Sequential(*enc_share)
 
     def forward(self, x, y):
-        outX = self.convX(x)
-        outY = self.convY(y)
+        if x.size(1) == 1:
+            outX = self.maskConvX(x)
+        else:
+            outX = self.imageConvX(x)
+        if y.size(1) == 1:
+            outY = self.maskConvY(y)
+        else:
+            outY = self.imageConvY(y)
+        outX = self.convX(outX)
+        outY = self.convY(outY)
         outX = self.conv_share(outX)
         outY = self.conv_share(outY)
         return outX, outY
 
     def forward_x(self, x):
-        out = self.convX(x)
+        if x.size(1) == 1:
+            out = self.maskConvX(x)
+        else:
+            out = self.imageConvX(x)
+        out = self.convX(out)
         out = self.conv_share(out)
         return out
 
     def forward_y(self, y):
-        out = self.convY(y)
+        if y.size(1) == 1:
+            out = self.maskConvY(y)
+        else:
+            out = self.imageConvY(y)
+        out = self.convY(out)
         out = self.conv_share(out)
         return out
 
@@ -279,6 +349,24 @@ class StyleEncoder(nn.Module):
         out_y = self.model_y(y)
         out_y = out_y.view(out_y.size(0), -1)
         return out_y
+
+class ContentTranslator(nn.Module):
+    def __init__(self, dim, n_blocks=6, padding_type='reflect'):
+        super(ContentTranslator, self).__init__()
+        model_x = []
+        model_y = []
+        for i in range(n_blocks):
+            model_x += [ResnetBlock(dim, padding_type=padding_type, norm_layer=nn.InstanceNorm2d, use_dropout=False,
+                                    use_bias=True)]
+            model_y += [ResnetBlock(dim, padding_type=padding_type, norm_layer=nn.InstanceNorm2d, use_dropout=False,
+                                    use_bias=True)]
+        self.model_x = nn.Sequential(*model_x)
+        self.model_y = nn.Sequential(*model_y)
+
+    def forward(self, x, y):
+        out_x = self.model_x(x)
+        out_y = self.model_y(y)
+        return out_x, out_y
 
 ####################################################################
 #--------------------------- Generators ----------------------------
@@ -364,6 +452,48 @@ class Generator(nn.Module):
         x_and_z4 = torch.cat([out3, z_img4], 1)
         out4 = self.decY4(x_and_z4)
         return out4
+
+class ContentMaskDecoder(nn.Module):
+    def __init__(self, input_dim_x, input_dim_y, output_dim_x, output_dim_y):
+        super(ContentMaskDecoder, self).__init__()
+        model_x = []
+        model_y = []
+        for i in range(0, 3):
+            model_x += [INSResBlock(input_dim_x, input_dim_x)]
+            model_y += [INSResBlock(input_dim_y, input_dim_y)]
+        self.layer1_x = nn.Sequential(*model_x)
+        self.layer1_y = nn.Sequential(*model_y)
+        model_x = []
+        model_y = []
+        dim_x = input_dim_x
+        dim_y = input_dim_y
+        for i in range(0, 2):
+            model_x += [ReLUINSConvTranspose2d(dim_x, dim_x // 2, kernel_size=3, stride=2, padding=1, output_padding=1)]
+            model_y += [ReLUINSConvTranspose2d(dim_y, dim_y // 2, kernel_size=3, stride=2, padding=1, output_padding=1)]
+            dim_x = dim_x // 2
+            dim_y = dim_y // 2
+        self.layer2_x = nn.Sequential(*model_x)
+        self.layer2_y = nn.Sequential(*model_y)
+        model_x = []
+        model_y = []
+        model_x += [nn.ConvTranspose2d(dim_x, output_dim_x, kernel_size=1, stride=1, padding=0),
+                    nn.Tanh()]
+        model_y += [nn.ConvTranspose2d(dim_y, output_dim_y, kernel_size=1, stride=1, padding=0),
+                    nn.Tanh()]
+        self.layer3_x = nn.Sequential(*model_x)
+        self.layer3_y = nn.Sequential(*model_y)
+
+    def forward(self, x, y):
+        # print('x size:', x.size())
+        out1_x = self.layer1_x(x)
+        # print('out1_x size:', out1_x.size())
+        out2_x = self.layer2_x(out1_x)
+        # print('out2_x size:', out2_x.size())
+        out3_x = self.layer3_x(out2_x)
+        out1_y = self.layer1_y(y)
+        out2_y = self.layer2_y(out1_y)
+        out3_y = self.layer3_y(out2_y)
+        return out3_x, out3_y
 
 class GlobalLevelResBlock(nn.Module):
     def __init__(self, inplanes, planes, stride=1, dropout=0.0):
@@ -541,7 +671,7 @@ class ResnetBlock(nn.Module):
         return out
 
 class ClothTransfer(nn.Module):
-    def __init__(self, input_nc, output_nc, ngf=64, norm='batch', use_dropout=False, n_blocks=6, padding_type='reflect'):
+    def __init__(self, input_nc, output_nc, ngf=64, norm='batch', use_dropout=False, n_blocks=9, padding_type='reflect'):
         super(ClothTransfer, self).__init__()
         norm_layer = get_norm_layer(norm_type=norm)
         self.model_x = ResnetSetGenerator(input_nc, output_nc, ngf, norm_layer, use_dropout, n_blocks, padding_type)
